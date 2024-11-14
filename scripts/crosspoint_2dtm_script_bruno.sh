@@ -15,7 +15,7 @@ ml cudnn/8.9.7.29_cuda12
 
 conda activate crosspoint_2dtm
 
-cd /home/kithmini.herath/codes/CrossPoint
+cd /home/kithmini.herath/codes/CL-based-particle-picking
 
 # to set the constraint for slurm: --constraint=a100_80
 # crosspoint_2dtm_2 : val_included 0

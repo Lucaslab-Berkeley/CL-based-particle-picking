@@ -6,7 +6,7 @@ ml cudnn/8.9.7.29_cuda12
 
 conda activate crosspoint_2dtm
 
-cd /home/kithmini.herath/codes/CrossPoint
+cd /home/kithmini.herath/codes/CL-based-particle-picking
 
 # Traning CrossPoint for classification, epochs = 100
 python train_crosspoint_Original.py --model dgcnn --epochs 2 --lr 0.001 --exp_name crosspoint_dgcnn_cls --batch_size 20 --print_freq 20 --k 15 --save_freq 10 --test True
