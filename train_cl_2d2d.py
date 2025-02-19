@@ -15,12 +15,12 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import torchvision.transforms as transforms
-from torchvision.models import resnet50, resnet18
+from torchvision.models import resnet50, resnet101
 from torch.utils.data import DataLoader
 
-from datasets.data import cryoEM_onTheFly_loader
+from datasets.data import cryoEM_cl2d2d_loader
 import datasets.data_utils as d_utils
-from models.dgcnn import DGCNN, ResNet, DGCNN_partseg
+from models.dgcnn import ResNet
 from util import IOStream, AverageMeter
 from vis_utils import *
 from losses import SupConLoss
@@ -29,10 +29,10 @@ from losses import SupConLoss
 def _init_():
     # if not os.path.exists('results'):
     #     os.makedirs('/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results')
-    if not os.path.exists('/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results/'+args.exp_name):
-        os.makedirs('/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results/'+args.exp_name)
-    if not os.path.exists('/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results/'+args.exp_name+'/'+'models'):
-        os.makedirs('/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results/'+args.exp_name+'/'+'models')
+    if not os.path.exists('/global/scratch/users/kithminiherath/results/'+args.exp_name):
+        os.makedirs('/global/scratch/users/kithminiherath/results/'+args.exp_name)
+    if not os.path.exists('/global/scratch/users/kithminiherath/results/'+args.exp_name+'/'+'models'):
+        os.makedirs('/global/scratch/users/kithminiherath/results/'+args.exp_name+'/'+'models')
         
 def loop(img_model, loader, opt, criterion, epoch, args, type_ = "train", device="cuda"):
     losses = AverageMeter()
@@ -52,7 +52,6 @@ def loop(img_model, loader, opt, criterion, epoch, args, type_ = "train", device
     for i, (data_t1, data_t2, labels) in enumerate(loader):
         if args.test and i>2: break
         data_t1, data_t2, labels = data_t1.to(device), data_t2.to(device), labels.to(device)
-        print("Checking shapes of images to make sure channel dim is present:", data_t1.shape, data_t2.shape)
         # print(data_t1.device, data_t2.device, imgs.device, labels.device, next(img_model.parameters()).device)
         batch_size = data_t1.size()[0]
 
@@ -98,23 +97,27 @@ def train(args):
     
     # the following is an image transform
     transform = transforms.Compose([transforms.ToTensor(), # This converts PIL Image to tensor and scales to [0, 1]
+                                # nn.AvgPool2d(kernel_size=2, stride=2),
                                 d_utils.AddGaussianNoise_multiple(stds=noise2d, p=1),
-                                transforms.Resize((224, 224), antialias=True),
+                                d_utils.ProjectionRotate(angles=[90, 180, 270], p=0.5), # MiLoPYP paper mentions that for 3D volumes rotations of multiples of 90 avoids interpolation artifacts and simplifies the resampling of voxel values
+                                # transforms.Resize((224, 224), antialias=True),
                                 # transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4),
-                                transforms.RandomHorizontalFlip(),
-                                # transforms.Normalize((0.5,), (0.5,))]) # normalize within -1,1
-                                # transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])]
+                                # transforms.CenterCrop((300, 300)),
+                                transforms.RandomHorizontalFlip(), # default probability = 0.5 -- MiLOPYP does random horizontal and vertical flip as well (https://github.com/nextpyp/cet_pick/blob/426cc92d9f5459ec4fb9ae91b2bddac65363f870/cet_pick/datasets/tomo_post_proj_angle_select.py#L40)
+                                transforms.RandomVerticalFlip(), # from MiLOPYP 
+                                transforms.RandomResizedCrop(args.image_size, (0.7,1.0),(1.0,1.0)) # from MiLOPYP 
+                                # transforms.Normalize((0.5,), (0.5,)) # normalize within -1,1 -- removed this due to the simulated and real data already being standard normalized and didn't want to cause too much distortion by renormalization
                                 # transforms.v2.GaussianNoise(mean=0.0, sigma=0.05, clip=True),
                                 ])
 
     #### Edit for train-test split
-    data_dir = f"/hpc/projects/group.czii/kithmini.herath/contrastive-learning-data/{args.dataset}"
+    data_dir = f"/global/scratch/users/kithminiherath/{args.dataset}"
     type_ = "train"
-    train_set = cryoEM_onTheFly_loader(f"{data_dir}/{type_}", img_transform = transform, pc1_transform = pc_trans_1, pc2_transform = pc_trans_2, load_perc=args.load_perc, type_=type_)
+    train_set = cryoEM_cl2d2d_loader(f"{data_dir}/{type_}", img_transform = transform, type_=type_, filter_type=args.filter_type, filter_cutoff=args.filter_cutoff, fourier_transformed=args.fourier_transformed)
     train_loader = DataLoader(train_set, num_workers=12, batch_size=args.batch_size, shuffle=True, drop_last=True, pin_memory=True) # the n_imgs parameter is not being used as of now
     
     type_ = "test"
-    val_set = cryoEM_onTheFly_loader(f"{data_dir}/{type_}", img_transform = transform, pc1_transform = pc_trans_1, pc2_transform = pc_trans_2, load_perc=args.load_perc, type_=type_)
+    val_set = cryoEM_cl2d2d_loader(f"{data_dir}/{type_}", img_transform = transform, type_=type_, filter_type=args.filter_type, filter_cutoff=args.filter_cutoff, fourier_transformed=args.fourier_transformed)
     val_loader = DataLoader(val_set, num_workers=12, batch_size=args.batch_size, shuffle=True, drop_last=True, pin_memory=True)
 
     device = torch.device("cuda" if args.cuda else "cpu")
@@ -124,9 +127,13 @@ def train(args):
         print("Testing Phase !!!")
 
     #Try to load models
-    img_model = ResNet(resnet50(), feat_dim = 2048) # i think this is loading from pretrained weights. but i'm replacing the first layer with my own layer...so not sure how much this affects the learned behavior of resnets
+    if args.model == 'resnet50':
+        img_model = ResNet(resnet50(), feat_dim = 2048) # i think this is loading from pretrained weights. but i'm replacing the first layer with my own layer...so not sure how much this affects the learned behavior of resnets
     # the resnet50 will take an image of any size and give an output based on the feat_dim argument size
     # the inv model (projection head) is set to take in a 2048 dim feature and output 256 dim feature for the contrast loss -- so would need to change this in the future along with feat_dim above to get what you want as feature dimensions
+    elif args.model == 'resnet101':
+        img_model = ResNet(resnet101(), feat_dim = 2048)
+    
     img_model = img_model.to(device)
         
     parameters = img_model.parameters()
@@ -148,7 +155,7 @@ def train(args):
     
     best_acc = 0
     train_loss_lst, val_loss_lst, train_acc_lst, val_acc_lst = [], [], [], []
-    # start_train_loop_time = time.time()
+    start_train_loop_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
         ####################
         # Train
@@ -214,32 +221,33 @@ def train(args):
         if val_accuracy > best_acc:
             best_acc = val_accuracy
             print('==> Saving Best Model...')
-            save_img_model_file = os.path.join(f'/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results/{args.exp_name}/models/',
+            save_img_model_file = os.path.join(f'/global/scratch/users/kithminiherath/results/{args.exp_name}/models/',
                          'img_model_best.pth')
             torch.save(img_model.state_dict(), save_img_model_file)
   
         if epoch % args.save_freq == 0:
             print('==> Saving...')
-            save_img_model_file = os.path.join(f'/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results/{args.exp_name}/models/',
+            save_img_model_file = os.path.join(f'/global/scratch/users/kithminiherath/results/{args.exp_name}/models/',
                          'img_model_ckpt_epoch_{epoch}.pth'.format(epoch=epoch))
             torch.save(img_model.state_dict(), save_img_model_file)
             
             plot_train_losses(train_loss_lst, val_loss_lst, return_fig= True)
-            plt.savefig(f'/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results/{args.exp_name}/train_losses_latest.png')
+            plt.savefig(f'/global/scratch/users/kithminiherath/results/{args.exp_name}/train_losses_latest.png')
 
             plot_classifier_acc(train_acc_lst, val_acc_lst, return_fig= True)
-            plt.savefig(f'/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results/{args.exp_name}/classifier_accuracies_latest.png')
+            plt.savefig(f'/global/scratch/users/kithminiherath/results/{args.exp_name}/classifier_accuracies_latest.png')
 
 
+    print(f"Total train time = {(time.time() - start_train_loop_time)/60} minutes")
     print('==> Saving Last Model...')
-    save_img_model_file = os.path.join(f'/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results/{args.exp_name}/models/',
+    save_img_model_file = os.path.join(f'/global/scratch/users/kithminiherath/results/{args.exp_name}/models/',
                          'img_model_last.pth')
     torch.save(img_model.state_dict(), save_img_model_file)
     plot_train_losses(train_loss_lst, val_loss_lst, return_fig= True)
-    plt.savefig(f'/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results/{args.exp_name}/train_losses_last.png')
+    plt.savefig(f'/global/scratch/users/kithminiherath/results/{args.exp_name}/train_losses_last.png')
     
     plot_classifier_acc(train_acc_lst, val_acc_lst, return_fig= True)
-    plt.savefig(f'/hpc/projects/group.czii/kithmini.herath/crosspoint-trained-models/results/{args.exp_name}/classifier_accuracies_last.png')
+    plt.savefig(f'/global/scratch/users/kithminiherath/results/{args.exp_name}/classifier_accuracies_last.png')
 
 def float_list(arg):
     return list(map(float, arg.split(',')))
@@ -249,9 +257,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Point Cloud Recognition')
     parser.add_argument('--exp_name', type=str, default='exp', metavar='N',
                         help='Name of the experiment')
-    parser.add_argument('--model', type=str, default='dgcnn', metavar='N',
-                        choices=['dgcnn', 'dgcnn_seg'],
+    parser.add_argument('--model', type=str, default='resnet50', metavar='N',
+                        choices=['resnet50', 'resnet101'],
                         help='Model to use, [pointnet, dgcnn]')
+    parser.add_argument('--image_size', type=int, metavar='image_size',
+                        help='Size of image)')
     parser.add_argument('--batch_size', type=int, default=16, metavar='batch_size',
                         help='Size of batch)')
     parser.add_argument('--test_batch_size', type=int, default=16, metavar='batch_size',
@@ -291,6 +301,9 @@ if __name__ == "__main__":
     parser.add_argument('--noise2d', type=str, help='comma-separated list of std values for noise (e.g., 0.05 0.1 0.15)')
     parser.add_argument('--noise3d', type=float, default=0.1, help='the std of the noise that should be added to the templates (3d)')
     parser.add_argument('--imid_reg', type=float, default=1.0, help='regularization parameter for the IMID loss')
+    parser.add_argument('--filter_type', type=str, help='Type of filter: lowpass, highpass, "", None')
+    parser.add_argument('--filter_cutoff', type=float, default=0.1, help='Normalized cutoff frequency of the filter')
+    parser.add_argument('--fourier_transformed', type=bool, default=False, help='Fourier transformed? True - will be fourier transformed post filtering')
     args = parser.parse_args()
 
     _init_()

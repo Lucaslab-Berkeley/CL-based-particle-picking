@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.models import resnet50
+from torchvision.models import resnet50, resnet101
 import torch.nn.init as init
 
 def knn(x, k):
@@ -146,10 +146,10 @@ class ResNet(nn.Module):
                             ) 
         
     def forward(self, x):
-        x = self.resnet(x)
-        x = self.inv_head(x)
+        feats = self.resnet(x)
+        out = self.inv_head(feats)
         
-        return x
+        return feats, out
     
     
 class Transform_Net(nn.Module):
