@@ -10,6 +10,7 @@ import math
 from PIL import Image
 from .plyfile import load_ply
 from . import data_utils as d_utils
+from . import filters
 import torchvision.transforms as transforms
 import warnings
 from tqdm import tqdm
@@ -28,6 +29,7 @@ from scipy.interpolate import RegularGridInterpolator
 from scipy.spatial.transform import Rotation
 import glob
 import time
+import mrcfile
 
 from typing import Tuple
 
@@ -42,8 +44,26 @@ def load_template_data(DATA_DIR):
     # print(all_filepath)    
     return all_filepath
 
+def load_img_data(DATA_DIR):
+    all_filepath = []
+    
+    for cls in sorted(glob.glob(os.path.join(DATA_DIR, '*'))):
+        imgs = sorted(glob.glob(os.path.join(cls, '*')))
+        if len(imgs)%2 == 0:
+            all_filepath += imgs
+        else:
+            all_filepath += imgs[:-1]
+    # print(all_filepath)    
+    return all_filepath
+
 def load_struc_files_npy(fp):
     return np.load(fp) # downsampled numpy array
+
+def load_img_file(fp):
+    with mrcfile.open(fp) as mrc:
+        data = mrc.data.copy()
+        
+    return data
 
 class ScatteringPotential:
     """This class holds a 3D scattering potential array and provides methods for
@@ -224,3 +244,48 @@ class cryoEM_onTheFly_loader(Dataset):
     
     def __len__(self):
         return len(self.data)
+    
+def prenorm(fp):
+    if "_projection_" not in fp:
+        img = load_img_file(fp)
+        return (img - np.mean(img)) / np.std(img)
+    else:
+        return load_img_file(fp)
+    
+class cryoEM_cl2d2d_loader(Dataset):
+    def __init__(self, fp = "", img_transform = None, type_="train", filter_type="lowpass", filter_cutoff=0.1, fourier_transformed=False):
+        self.data = load_img_data(fp) # ribosome, background
+        self.transform = img_transform
+        self.type = type_
+        self.filter_type = filter_type
+        self.filter_cutoff = filter_cutoff
+        self.fourier_transformed = fourier_transformed
+    
+    def __getitem__(self, item):                
+        label_map = {'ribosome':0, 'background':1}
+        
+        img1_fp = self.data[2*item]
+        img2_fp = self.data[2*item + 1]
+        
+        img1_class = img1_fp.split("/")[-2]
+        img2_class = img2_fp.split("/")[-2]
+                
+        assert img1_class == img2_class, "Classes different in positive pair !!!"
+        
+        img1 = prenorm(img1_fp)
+        img2 = prenorm(img2_fp)
+        
+        img1_filtered = filters.filter_image(img1, self.filter_cutoff, filter_type = self.filter_type)
+        img2_filtered = filters.filter_image(img2, self.filter_cutoff, filter_type = self.filter_type)
+        
+        if self.fourier_transformed:
+            img1_filtered = np.fft.fftshift(np.fft.fft2(img1_filtered))
+            img2_filtered = np.fft.fftshift(np.fft.fft2(img2_filtered))
+
+        img_t1 = self.transform(img1_filtered.astype('float32'))
+        img_t2 = self.transform(img2_filtered.astype('float32'))
+    
+        return img_t1, img_t2, label_map[img1_class] 
+    
+    def __len__(self):
+        return len(self.data)//2

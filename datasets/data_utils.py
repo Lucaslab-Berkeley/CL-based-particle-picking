@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import time
 import random
+import torchvision.transforms.functional as TF
 
 def angle_axis(angle, axis):
     # type: (float, np.ndarray) -> float
@@ -64,6 +65,19 @@ class PointcloudScale(object):
         scaler = np.random.uniform(self.lo, self.hi)
         points[:, 0:3] *= scaler
         return points
+    
+class ProjectionRotate(object):
+    """Rotate by one of the given angles."""
+
+    def __init__(self, angles, p=1):
+        self.angles = angles
+        self.p = p
+
+    def __call__(self, x):
+        if np.random.uniform(0, 1) > self.p:
+            return x
+        angle = random.choice(self.angles)
+        return TF.rotate(x, angle) # this functional rotates by rotation angle value in degrees, counter-clockwise.
 
 
 class PointcloudRotate(object):
